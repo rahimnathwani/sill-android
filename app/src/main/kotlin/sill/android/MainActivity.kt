@@ -736,6 +736,9 @@ class MainActivity : Activity() {
     private fun showStream() {
         if (streamView != null) return
         val sv = StreamView(this, send = { e -> session?.input(e) }, onWindows = { pickWindow() }, onDisconnect = { confirmDisconnect() })
+        val prefs = getSharedPreferences("sill", MODE_PRIVATE)
+        sv.drawMode = prefs.getBoolean("drawMode", false)
+        sv.onDrawModeChange = { on -> prefs.edit().putBoolean("drawMode", on).apply() }
         sv.addSurfaceCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) { decoder.setSurface(holder.surface) }
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}

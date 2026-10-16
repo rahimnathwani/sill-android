@@ -83,6 +83,15 @@ class StreamView(
 
     var ctrlIsCommand = true
 
+    /**
+     * Draw mode: one finger is the mouse with its button down (press where it lands, drag, let go
+     * where it lifts), for drawing apps and anything else that wants a drag. Off: one finger scrolls.
+     */
+    var drawMode = false
+        set(v) { field = v; drawButton.isSelected = v; styleBar(drawButton, v) }
+    var onDrawModeChange: (Boolean) -> Unit = {}
+    private lateinit var drawButton: Button
+
     init {
         setBackgroundColor(Color.BLACK)
         clipChildren = true
@@ -100,6 +109,8 @@ class StreamView(
         bar.background = pill(0xB0202020.toInt())
         bar.setPadding(dp(4), dp(2), dp(4), dp(2))
         barButton("Windows") { onWindows() }
+        drawButton = barButton("Draw") { drawMode = !drawMode; onDrawModeChange(drawMode) }
+        drawButton.contentDescription = "Draw mode"
         barButton("Keyboard") { toggleKeyboard() }
         fitButton = barButton("Fit") { resetZoom() }
         fitButton.visibility = GONE
@@ -417,6 +428,17 @@ class StreamView(
                 MotionEvent.ACTION_DOWN -> {
                     momentum.stop()
                     focusKeys()
+                    if (drawMode) {
+                        // The button goes down where the finger lands; DRAG carries it from there.
+                        mode = Mode.NONE
+                        lastX = e.x; lastY = e.y
+                        normalized(e.x, e.y, false)?.let { p ->
+                            mode = Mode.DRAG
+                            downLatched()
+                            pointer(PointerAction.MOVE, p); pointer(PointerAction.LEFT_DOWN, p)
+                        }
+                        return true
+                    }
                     mode = Mode.PENDING
                     downX = e.x; downY = e.y; lastX = e.x; lastY = e.y
                     downTime = SystemClock.uptimeMillis()
@@ -670,6 +692,10 @@ class StreamView(
             if (latched.remove(flag)) styleKey(b, false) else { latched.add(flag); styleKey(b, true) }
         }
         latchButtons[flag] = b
+    }
+
+    private fun styleBar(b: Button, on: Boolean) {
+        b.background = if (on) pill(0xFF2B6CB0.toInt()) else null
     }
 
     private fun styleKey(b: Button, on: Boolean) {

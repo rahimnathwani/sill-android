@@ -36,6 +36,7 @@ The phone's key is made in Android Keystore and never leaves it.
 | **Drag one finger** | Scroll, with momentum |
 | **Hold, then move** | Drag (select text, move a window) |
 | **Hold and lift** / **two-finger tap** | Right-click |
+| **Draw** (bar toggle) | One finger presses the mouse button and drags: draw in tldraw, Figma, Preview. Tap Draw again to scroll |
 | **Pinch / two-finger move** | Zoom and pan the picture on the phone only; **Fit** resets |
 | **Windows** | Pick a window, the Desktop, or open an app |
 | **Keyboard** | Type; the key row adds esc, tab, ⌘ ⌃ ⌥ ⇧ (tap to latch for the next key or click), arrows and Spotlight |
