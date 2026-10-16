@@ -1,0 +1,11 @@
+Sill for Android (unofficial)
+Copyright 2026 Rahim Nathwani
+
+An independent client for Sill (https://getsill.app), the Mac app by Noah Saffer. Not made, endorsed
+or supported by Sill's developer. "Sill" names the Mac app this client works with.
+
+This client implements Sill's wire protocol as documented in Sill's source code
+(https://github.com/Saffsanity/sill, Sources/StreamProtocol), Copyright 2026 Noah Saffer, licensed
+under the Apache License, Version 2.0. No Sill source code is included; constants and formats the
+protocol requires (message kinds, the pairing proof's labels, the Damm table) are reproduced so the
+two interoperate.

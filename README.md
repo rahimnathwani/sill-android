@@ -1,18 +1,22 @@
 # Sill for Android (unofficial)
 
 An Android client for [Sill](https://getsill.app), the free, open-source app that streams your
-Mac's windows to a phone. Install Sill on the Mac as usual, install this APK on an Android phone,
+Mac's windows to a phone. Install Sill on the Mac as usual, install this app on an Android phone,
 and the phone finds the Mac, pairs with a code, and shows and controls its windows.
 
-Not made by Sill's author. It speaks Sill's own wire protocol (Saffsanity/sill,
-`Sources/StreamProtocol`), so the Mac needs no changes.
+**Unofficial:** not made, endorsed or supported by Sill's developer. It speaks Sill's own wire
+protocol ([Saffsanity/sill](https://github.com/Saffsanity/sill), `Sources/StreamProtocol`), so the
+Mac needs no changes. Problems with this app go to
+[this repo's issues](https://github.com/rahimnathwani/sill-android/issues), not Sill's.
 
 ## Use it
 
 1. **On the Mac:** install Sill from [getsill.app/download](https://getsill.app/download) and open it
    (allow Screen Recording and Accessibility when it asks).
-2. **On the phone:** install `sill-android-<version>.apk` (allow installs from your file manager or
-   browser when Android asks). Android 10 or later.
+2. **On the phone:** download `sill-android-<version>.apk` from
+   [Releases](https://github.com/rahimnathwani/sill-android/releases/latest) and open it (allow
+   installs from your browser when Android asks). Android 11 or later. A Google Play listing is on
+   its way. To be told of updates, add this repo to [Obtainium](https://obtainium.imranr.dev).
 3. **Connect:** with both on the same Wi-Fi, open Sill on the phone and tap your Mac. The Mac shows
    a pairing window with a 12-digit code; type it on the phone. Next time it connects at once.
 
@@ -50,17 +54,32 @@ The phone's key is made in Android Keystore and never leaves it.
 - Direct Wireless (AWDL is Apple-only) and pairing over a USB cable (the Mac recognises only
   iPhones and iPads there): pair with the code.
 
+## Privacy
+
+The app talks only to your own Macs, encrypted; nothing reaches its developer or anyone else. See
+[PRIVACY.md](PRIVACY.md).
+
 ## Build
 
 Needs JDK 17 and the Android SDK (platform 36).
 
 ```
 ./gradlew :protocol:test          # protocol unit tests (crypto vectors, framing, JSON, HEVC)
-./gradlew :app:assembleRelease    # app/build/outputs/apk/release/app-release.apk
+./gradlew :app:assembleDebug      # app/build/outputs/apk/debug/app-debug.apk (io.github.rahimnathwani.sill.debug)
 ```
 
-The release build is signed with the local debug key so it installs as is. Updates must be signed
-with the same key, so keep building on the same machine (or set up your own signing config).
+A debug build installs beside the release one and also lists plain-TCP test hosts.
+
+## Release
+
+```
+scripts/release.sh 0.2.0            # tests, lint, signed APK and Play bundle in dist/, signature checked
+scripts/release.sh 0.2.0 --publish  # then tag v0.2.0 and create the GitHub release with the APK
+```
+
+Add a `## 0.2.0` section to CHANGELOG.md first; it becomes the release notes. The upload key is
+`~/.config/sill-android/upload.jks` with its password in the macOS keychain
+(`sill-android-upload-key`); it never enters the repository or CI. Google Play: `play/checklist.md`.
 
 ### Live test against a Mac host
 
@@ -95,4 +114,4 @@ An emulator reaches that host at `10.0.2.2:<port>` through **Connect by addressâ
 
 ## License
 
-Apache-2.0, as Sill.
+Apache-2.0. See [NOTICE](NOTICE) for how this relates to Sill.

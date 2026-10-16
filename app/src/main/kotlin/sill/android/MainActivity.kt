@@ -143,6 +143,10 @@ class MainActivity : Activity() {
         work.shutdownNow()
     }
 
+    // Android 11 and 12 only: from 13 the OnBackInvokedCallback registered in onCreate takes Back,
+    // and this is never called.
+    @Suppress("DEPRECATION")
+    @android.annotation.SuppressLint("GestureBackNavigation")
     @Deprecated("Below Android 13")
     override fun onBackPressed() = back()
 
@@ -183,7 +187,8 @@ class MainActivity : Activity() {
         col.addView(title)
 
         val sub = TextView(this)
-        sub.text = "Your Mac's windows on this phone. Needs the free Sill app on the Mac (getsill.app), on the same Wi-Fi."
+        sub.text = "Your Mac's windows on this phone. Needs the free Sill app on the Mac (getsill.app), on the same Wi-Fi.\n" +
+            "An unofficial client, not made by Sill's developer. Version ${BuildInfo.version(this)}."
         sub.setTextColor(0xFFAAAAAA.toInt())
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         col.addView(sub, lp(top = 4))
@@ -844,10 +849,21 @@ class MainActivity : Activity() {
     companion object { private const val TAG = "Sill" }
 }
 
-/** The version this app tells the Mac in its hello. */
+/** The version this app tells the Mac in its hello: the package's own. */
 object BuildInfo {
-    const val VERSION = "0.1.0"
-    const val BUILD = "1"
+    @Volatile var VERSION = "0.1.0"
+        private set
+    @Volatile var BUILD = "1"
+        private set
+
+    fun version(context: Context): String {
+        try {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            VERSION = info.versionName ?: VERSION
+            BUILD = info.longVersionCode.toString()
+        } catch (_: Exception) {}
+        return VERSION
+    }
 }
 
 @Suppress("unused")
