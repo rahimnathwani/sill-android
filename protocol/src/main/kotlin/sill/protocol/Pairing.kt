@@ -164,7 +164,8 @@ object Pairing {
             PairResult.CLOSED -> "$macName isn't showing a pairing code. Choose Pair iPhone or iPad… in Sill's menu on the Mac, or tap the Mac again."
             PairResult.EXPIRED -> "The code on $macName expired. Tap the Mac to get a new one."
             PairResult.STOPPED -> "$macName stopped pairing after too many wrong codes. Try again in a few minutes."
-            PairResult.BUSY -> "$macName is busy pairing another device. Try again in a moment."
+            PairResult.BUSY -> r.retryAfter?.let { "Wait ${maxOf(1, Math.ceil(it).toInt())} s, then try the code again." }
+                ?: "$macName is busy. Wait a few seconds, then try again."
             PairResult.OPEN_ON_MAC -> "Open Sill on $macName, then tap it again."
             PairResult.LOCKED -> "Unlock $macName, then tap it again."
             else -> "$macName refused to pair (${r.reason ?: "no reason"})."
@@ -177,7 +178,7 @@ object Pairing {
 
 /** The QR code's content: `sill://pair?v=1&m=<macID>&k=<fp>&s=<secret>&n=<name>&p=<port>&a=<address>…`. */
 class PairLink(val macID: String, val fingerprint: ByteArray, val secret: ByteArray, val name: String,
-               val port: Int, val addresses: List<String>) {
+               val port: Int, val addresses: List<Pair<String, Int>>) {
     companion object {
         fun parse(text: String): PairLink? {
             val t = text.trim()
@@ -199,7 +200,9 @@ class PairLink(val macID: String, val fingerprint: ByteArray, val secret: ByteAr
             if (m != MacId.make(k)) return null
             val p = one("p")?.toIntOrNull() ?: return null
             if (p !in 1..65535) return null
-            return PairLink(m, k, s, one("n") ?: "Mac", p, q["a"] ?: emptyList())
+            val name = SafeText.label(one("n") ?: "").ifEmpty { "Mac" }
+            val addresses = (q["a"] ?: emptyList()).take(5).mapNotNull { Address.parse(it, p) }
+            return PairLink(m, k, s, name, p, addresses)
         }
     }
 }

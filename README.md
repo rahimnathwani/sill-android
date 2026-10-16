@@ -22,6 +22,12 @@ changed it). Pair at home first, or open **Pair iPhone or iPad…** in the Mac's
 the code it shows. Scanning the Mac's pairing QR code with the phone's camera also opens Sill and
 pairs.
 
+If the Mac forgets this phone (Sill › Settings › Devices › Remove, or Sill set up again), the phone
+says so and asks for a new code; it does not keep redialing (the Mac shuts out an address after
+five refusals in a minute).
+
+The phone's key is made in Android Keystore and never leaves it.
+
 ## Controls
 
 | Gesture | On the Mac |
@@ -37,10 +43,11 @@ pairs.
 
 ## What's not here (yet)
 
-- Trackpad mode, three-finger gestures, the Mac's menus, the clipboard, the Mac's settings panel.
+- Trackpad mode, three-finger gestures, the Mac's menus, the clipboard, the Mac's settings panel,
+  and the Mac's pointer drawn on the phone.
+- Held hardware keys don't repeat on the Mac (one press per press).
 - Direct Wireless (AWDL is Apple-only) and pairing over a USB cable (the Mac recognises only
   iPhones and iPads there): pair with the code.
-- The device key is stored in app-private storage, not in Android Keystore hardware.
 
 ## Build
 
@@ -80,7 +87,8 @@ An emulator reaches that host at `10.0.2.2:<port>` through **Connect by address�
   the device's P-256 key and self-signed certificate (`Identity`), TLS 1.3 with SPKI pinning and
   ALPN `sill/1` / `sill-pair/1` (`Tls`), the pairing exchanges (`Pairing`), a session with hello,
   viewport, ping, liveness and stats (`Session`), HEVC hvcC → Annex B and SPS size (`Hevc`).
-- `app/` — the Android app: Bonjour discovery (`Discovery`, NsdManager), MediaCodec decoding
+- `app/` — the Android app (plain-TCP doors, development hosts only, are listed in debug builds
+  alone): Bonjour discovery (`Discovery`, NsdManager), MediaCodec decoding
   (`VideoDecoder`), touch and keyboard (`StreamView`, `HidKeys`), screens and flow (`MainActivity`),
   storage (`Store`).
 

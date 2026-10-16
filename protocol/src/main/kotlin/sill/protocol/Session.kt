@@ -65,6 +65,7 @@ class Session(
     private val ended = AtomicBoolean(false)
     @Volatile private var lastReceived = System.nanoTime()
     @Volatile private var goodbye: Goodbye? = null
+    @Volatile private var connectedAt = 0L
 
     // Once-a-second measurements, for the Mac's log and its menu (kind 12).
     private val statsLock = Any()
@@ -86,6 +87,7 @@ class Session(
         val conn = if (target.plain) Tls.connectPlain(target.host, target.port)
                    else Tls.connect(target.host, target.port, identity, Tls.SESSION_ALPN, target.pin)
         macFingerprint = conn.macFingerprint
+        connectedAt = System.nanoTime()
         socket = conn.socket
         out = conn.socket.getOutputStream()
         // The hello is the first message of every session connection.
@@ -94,11 +96,16 @@ class Session(
 
     /** Starts the reader and the timers; call after [connect], with the first viewport. */
     fun start(viewport: Map<String, Any?>) {
+        if (ended.get()) return          // refused or closed already (the hello's write can end it)
         sendJson(Kind.VIEWPORT, viewport)
         lastReceived = System.nanoTime()
         Thread({ readLoop() }, "sill-reader").apply { isDaemon = true }.start()
-        timers.scheduleAtFixedRate({ ping() }, 0, 250, TimeUnit.MILLISECONDS)
-        timers.scheduleAtFixedRate({ stats() }, 1, 1, TimeUnit.SECONDS)
+        try {
+            timers.scheduleAtFixedRate({ ping() }, 0, 250, TimeUnit.MILLISECONDS)
+            timers.scheduleAtFixedRate({ stats() }, 1, 1, TimeUnit.SECONDS)
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            return                       // it ended meanwhile; onEnded has said why
+        }
         listener.onConnected(this)
     }
 
@@ -199,12 +206,12 @@ class Session(
         if (previous?.active is Source.Window) {
             // A watched window closed: give the person 2 s to pick something else.
             val pickBefore = lastPick
-            timers.schedule({
+            if (!ended.get()) try { timers.schedule({
                 if (windowList?.active == Source.None && lastPick == pickBefore && !ended.get()) {
                     lastAutoDesktop = System.currentTimeMillis()
                     sendJson(Kind.SELECT_SOURCE, Source.Desktop.toJson())
                 }
-            }, 2, TimeUnit.SECONDS)
+            }, 2, TimeUnit.SECONDS) } catch (_: java.util.concurrent.RejectedExecutionException) {}
         } else {
             lastAutoDesktop = now
             sendJson(Kind.SELECT_SOURCE, Source.Desktop.toJson())
@@ -247,6 +254,17 @@ class Session(
         timers.shutdownNow()
         writer.shutdown()
         try { socket?.close() } catch (_: Exception) {}
-        listener.onEnded(bye ?: goodbye, if ((bye ?: goodbye) != null) null else error)
+        val said = bye ?: goodbye
+        // In TLS 1.3 the device's handshake completes before the Mac has judged its key, so a Mac
+        // that no longer trusts this device answers the first read with an alert. A pinned session
+        // that dies that way before its first window list was refused, not lost: never redial it.
+        // On the device's side that is a TLS alert, or a broken pipe or reset on the hello's write.
+        val early = (System.nanoTime() - connectedAt) < 3_000_000_000L
+        val refused = said == null && windowList == null && target.pin != null && !target.plain &&
+            (error is javax.net.ssl.SSLException || (early && error is IOException))
+        listener.onEnded(said, if (said != null) null else if (refused) Refused(error) else error)
     }
+
+    /** The Mac refused this device's key (removed, or it was set up again): pair again. */
+    class Refused(cause: Throwable) : IOException("The Mac refused this device's key.", cause)
 }

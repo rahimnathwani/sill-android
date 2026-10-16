@@ -91,7 +91,7 @@ data class Goodbye(val reason: String, val message: String?, val minimumVersion:
         PAIRING_REQUIRED -> "$macName now asks devices to pair. Tap it to pair this $device." to false
         REMOTE_OFF -> "Remote Access is off on $macName." to false
         INTERNET_OFF -> "$macName no longer accepts connections from the internet." to false
-        BUSY -> "$macName has too many devices connected." to (reconnect == true)
+        BUSY -> "$macName has too many devices connected. Trying again…" to true
         else -> (message?.take(300)?.takeIf { it.isNotBlank() } ?: "$macName closed the connection ($reason).") to (reconnect == true)
     }
 }

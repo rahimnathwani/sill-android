@@ -124,6 +124,7 @@ class Discovery(context: Context, private val onChange: (List<FoundMac>) -> Unit
     }
 
     private fun record(info: NsdServiceInfo) {
+        if (listener == null) return      // a resolve that finished after stop()
         val address = address(info) ?: return
         if (info.port <= 0) return
         val txt = info.attributes ?: emptyMap()
@@ -134,7 +135,7 @@ class Discovery(context: Context, private val onChange: (List<FoundMac>) -> Unit
             else -> Door.PAIRING_REQUIRED
         }
         val tag = value("r")?.let { String(it) }
-        found[info.serviceName] = FoundMac(info.serviceName, address, info.port, door, tag)
+        found[info.serviceName] = FoundMac(unescape(info.serviceName), address, info.port, door, tag)
         publish()
     }
 
@@ -148,6 +149,22 @@ class Discovery(context: Context, private val onChange: (List<FoundMac>) -> Unit
             if (pick is Inet6Address && pick.isLinkLocalAddress && pick.scopedInterface != null && !a.contains('%'))
                 "$a%${pick.scopedInterface!!.name}" else a
         }
+    }
+
+    /** DNS-SD's decimal escapes ("\\032" for a space), which some NsdManager versions pass through. */
+    private fun unescape(name: String): String {
+        if (!name.contains('\\')) return name
+        val bytes = java.io.ByteArrayOutputStream()
+        var i = 0
+        while (i < name.length) {
+            val c = name[i]
+            if (c == '\\' && i + 3 < name.length && name.substring(i + 1, i + 4).all { it in '0'..'9' }) {
+                bytes.write(name.substring(i + 1, i + 4).toInt()); i += 4
+            } else if (c == '\\' && i + 1 < name.length) {
+                bytes.write(name[i + 1].toString().toByteArray()); i += 2
+            } else { bytes.write(c.toString().toByteArray()); i++ }
+        }
+        return String(bytes.toByteArray(), Charsets.UTF_8)
     }
 
     private fun publish() = onChange(found.values.sortedBy { it.serviceName.lowercase() })

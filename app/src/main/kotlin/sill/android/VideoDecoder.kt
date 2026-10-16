@@ -15,17 +15,23 @@ import java.nio.ByteBuffer
  * Decodes the Mac's HEVC stream onto a Surface with MediaCodec, as fast as it arrives: no
  * B-frames, no reordering, each decoded frame rendered at once (latency beats smoothness).
  *
- * Frames come from the session's reader thread; the Surface from the main thread. A new decoder
- * waits for a keyframe (the Mac sends one on connect, at a switch, and every 4 s).
+ * The session's reader thread only hands frames over ([onFrame] never waits), so a decoder that
+ * falls behind never stops the phone reading (the Mac drops a device that stops reading for 4 s).
+ * A feeder thread puts them into the codec. When frames pile up, the deltas are dropped and the
+ * decoder waits for the next keyframe (the Mac sends one on connect, at a switch, and every 4 s).
+ * The last keyframe is kept, so a decoder made later (the Surface came late) starts from it.
  */
 class VideoDecoder(private val onVideoSize: (width: Int, height: Int) -> Unit) {
+    private class Frame(val data: ByteArray, val keyframe: Boolean)
+
     private val lock = Object()
     private var surface: Surface? = null
     private var sets: ParameterSets? = null
     private var size: Hevc.Size? = null
     private var codec: MediaCodec? = null
-    private var drain: Thread? = null
-    @Volatile private var draining = false
+    private var generation = 0
+    private val queue = ArrayDeque<Frame>()
+    private var lastKeyframe: Frame? = null
     private var needKeyframe = true
     @Volatile var decoderName: String? = null
         private set
@@ -42,37 +48,31 @@ class VideoDecoder(private val onVideoSize: (width: Int, height: Int) -> Unit) {
     fun onParameterSets(new: ParameterSets) = synchronized(lock) {
         if (new.sameAs(sets)) return
         sets = new
+        lastKeyframe = null
         size = new.sps()?.let { Hevc.spsSize(it) }
         size?.let { onVideoSize(it.width, it.height) }
         release()
         configure()
     }
 
-    fun onFrame(payload: ByteArray, keyframe: Boolean) = synchronized(lock) {
-        val c = codec ?: return
-        val s = sets ?: return
-        if (needKeyframe && !keyframe) return
+    /** From the reader thread; never blocks on the codec. */
+    fun onFrame(payload: ByteArray, keyframe: Boolean) {
+        val s = synchronized(lock) { sets } ?: return
         val data = Hevc.toAnnexB(payload, s.nalLength) ?: return
-        try {
-            var index = c.dequeueInputBuffer(20_000)
-            if (index < 0) index = c.dequeueInputBuffer(80_000)
-            if (index < 0) {
-                // The decoder is behind; this delta is lost, so wait for the next keyframe rather
-                // than show a smeared picture.
-                droppedFrames++
+        val f = Frame(data, keyframe)
+        synchronized(lock) {
+            if (keyframe) {
+                lastKeyframe = f
+                queue.clear()          // a keyframe makes everything before it moot
+            } else if (queue.size >= MAX_QUEUED) {
+                droppedFrames += queue.size + 1
+                queue.clear()
                 needKeyframe = true
                 return
             }
-            val buf: ByteBuffer = c.getInputBuffer(index) ?: return
-            buf.clear()
-            if (data.size > buf.capacity()) { c.queueInputBuffer(index, 0, 0, 0, 0); needKeyframe = true; return }
-            buf.put(data)
-            c.queueInputBuffer(index, 0, data.size, System.nanoTime() / 1000, if (keyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
-            needKeyframe = false
-        } catch (e: Exception) {
-            Log.w(TAG, "decode: $e")
-            release()
-            configure()
+            if (codec == null) return  // kept as lastKeyframe for when the codec exists
+            queue.addLast(f)
+            lock.notifyAll()
         }
     }
 
@@ -80,6 +80,7 @@ class VideoDecoder(private val onVideoSize: (width: Int, height: Int) -> Unit) {
         surface = null
         release()
         sets = null
+        lastKeyframe = null
     }
 
     private fun configure() {
@@ -103,7 +104,10 @@ class VideoDecoder(private val onVideoSize: (width: Int, height: Int) -> Unit) {
                 codec = c
                 decoderName = name
                 needKeyframe = true
-                startDrain(c)
+                queue.clear()
+                lastKeyframe?.let { queue.addLast(it) }
+                generation++
+                startThreads(c, generation)
                 Log.i(TAG, "decoder $name for ${w}x$h")
                 return
             } catch (e: Exception) {
@@ -121,15 +125,51 @@ class VideoDecoder(private val onVideoSize: (width: Int, height: Int) -> Unit) {
         fun fits(info: MediaCodecInfo) = try {
             info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC).videoCapabilities.isSizeSupported(w, h)
         } catch (_: Exception) { false }
-        fun hardware(info: MediaCodecInfo) = if (Build.VERSION.SDK_INT >= 29) info.isHardwareAccelerated else !info.name.startsWith("c2.android") && !info.name.startsWith("OMX.google")
-        return all.sortedWith(compareByDescending<MediaCodecInfo> { fits(it) }.thenByDescending { hardware(it) }).map { it.name }
+        return all.sortedWith(compareByDescending<MediaCodecInfo> { fits(it) }.thenByDescending { it.isHardwareAccelerated })
+            .map { it.name }
     }
 
-    private fun startDrain(c: MediaCodec) {
-        draining = true
-        val t = Thread({
+    private fun alive(gen: Int) = synchronized(lock) { generation == gen && codec != null }
+
+    private fun startThreads(c: MediaCodec, gen: Int) {
+        // The feeder: frames from the queue into the codec, in order, waiting as long as it takes.
+        Thread({
+            while (true) {
+                val f = synchronized(lock) {
+                    while (generation == gen && codec != null && queue.isEmpty()) lock.wait(100)
+                    if (generation != gen || codec == null) null else queue.removeFirst()
+                } ?: break
+                synchronized(lock) {
+                    if (needKeyframe && !f.keyframe) return@synchronized null
+                    needKeyframe = false
+                    Unit
+                } ?: continue
+                try {
+                    var index = -1
+                    while (index < 0 && alive(gen)) index = c.dequeueInputBuffer(20_000)
+                    if (index < 0) break
+                    val buf = c.getInputBuffer(index) ?: continue
+                    buf.clear()
+                    if (f.data.size > buf.capacity()) {
+                        c.queueInputBuffer(index, 0, 0, 0, 0)
+                        synchronized(lock) { needKeyframe = true }
+                        continue
+                    }
+                    buf.put(f.data)
+                    c.queueInputBuffer(index, 0, f.data.size, System.nanoTime() / 1000,
+                        if (f.keyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
+                } catch (e: Exception) {
+                    if (!alive(gen)) break
+                    Log.w(TAG, "decode: $e")
+                    synchronized(lock) { needKeyframe = true }
+                }
+            }
+        }, "sill-decoder-in").apply { isDaemon = true }.start()
+
+        // The drain: each decoded frame rendered at once.
+        Thread({
             val info = MediaCodec.BufferInfo()
-            while (draining) {
+            while (alive(gen)) {
                 try {
                     val i = c.dequeueOutputBuffer(info, 10_000)
                     when {
@@ -141,14 +181,11 @@ class VideoDecoder(private val onVideoSize: (width: Int, height: Int) -> Unit) {
                         }
                     }
                 } catch (_: Exception) {
-                    if (!draining) break
+                    if (!alive(gen)) break
                     Thread.sleep(5)
                 }
             }
-        }, "sill-decoder-out")
-        t.isDaemon = true
-        drain = t
-        t.start()
+        }, "sill-decoder-out").apply { isDaemon = true }.start()
     }
 
     private fun cropWidth(f: MediaFormat): Int =
@@ -159,16 +196,23 @@ class VideoDecoder(private val onVideoSize: (width: Int, height: Int) -> Unit) {
         if (f.containsKey("crop-bottom") && f.containsKey("crop-top")) f.getInteger("crop-bottom") - f.getInteger("crop-top") + 1
         else if (f.containsKey(MediaFormat.KEY_HEIGHT)) f.getInteger(MediaFormat.KEY_HEIGHT) else 0
 
+    /** Called with [lock] held. The threads see the generation change and stop before release. */
     private fun release() {
         val c = codec ?: return
         codec = null
-        draining = false
-        drain?.join(200)
-        drain = null
+        generation++
+        queue.clear()
+        lock.notifyAll()
+        needKeyframe = true
+        // MediaCodec calls from the threads that are still inside one fail with
+        // IllegalStateException, which they treat as the end.
         try { c.stop() } catch (_: Exception) {}
         try { c.release() } catch (_: Exception) {}
-        needKeyframe = true
     }
 
-    companion object { private const val TAG = "SillDecoder" }
+    companion object {
+        private const val TAG = "SillDecoder"
+        /** Frames waiting for the codec before the deltas are given up (about 50 ms at 60 fps). */
+        private const val MAX_QUEUED = 3
+    }
 }

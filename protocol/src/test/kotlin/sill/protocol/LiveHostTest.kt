@@ -116,3 +116,27 @@ class LiveHostTest {
         return codes(f).lastOrNull()
     }
 }
+
+/** A device whose key the Mac does not trust, dialing the right Mac pinned: refused, not lost. */
+class LiveRefusedTest {
+    @Test fun unpairedKeyIsRefused() {
+        val host = System.getenv("SILL_LIVE_HOST") ?: run { println("SKIPPED"); return }
+        val port = System.getenv("SILL_LIVE_PORT")!!.toInt()
+        val stranger = DeviceIdentity.generate()
+        val macFp = Tls.fingerprintOf(host, port, stranger)!!
+        val ended = CountDownLatch(1)
+        val err = AtomicReference<Throwable?>()
+        val s = Session(Target(host, port, macFp), stranger, "stranger", "0.1", "1", object : SessionListener {
+            override fun onEnded(goodbye: Goodbye?, error: Throwable?) { err.set(error); ended.countDown() }
+        })
+        try {
+            s.connect()
+            s.start(Payloads.viewport(400.0, 300.0, 60))
+            assertTrue(ended.await(10, TimeUnit.SECONDS), "did not end")
+        } catch (e: Exception) {
+            err.set(e)   // a handshake that fails outright is refused just as well
+        }
+        println("ended with: ${err.get()}")
+        assertTrue(err.get() is Session.Refused || err.get() is javax.net.ssl.SSLException, "${err.get()}")
+    }
+}

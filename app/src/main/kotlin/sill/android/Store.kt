@@ -7,11 +7,16 @@ import android.util.Base64
 import sill.protocol.DeviceIdentity
 import sill.protocol.Json
 import sill.protocol.PairedMac
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.spec.ECGenParameterSpec
 
 /**
- * What this device keeps: its own key (made once; the Macs it paired with pin it) and the Macs it
- * paired with. App-private storage, excluded from backups (allowBackup false), so the key never
- * leaves the phone.
+ * What this device keeps: its own key (made once in Android Keystore, which never lets it out; the
+ * Macs it paired with pin it) and the Macs it paired with (app-private storage, no backups).
  */
 class Store(context: Context) {
     private val app = context.applicationContext
@@ -21,6 +26,25 @@ class Store(context: Context) {
 
     @Synchronized
     private fun loadIdentity(): DeviceIdentity {
+        // Android Keystore first: the key is made there and never leaves it.
+        try {
+            val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            if (!ks.containsAlias(KEY_ALIAS) && prefs.getString("deviceKey", null) == null) {
+                val g = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
+                g.initialize(KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_SIGN)
+                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
+                    .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_NONE)
+                    .build())
+                g.generateKeyPair()
+            }
+            if (ks.containsAlias(KEY_ALIAS)) {
+                val priv = ks.getKey(KEY_ALIAS, null) as PrivateKey
+                val pub = ks.getCertificate(KEY_ALIAS).publicKey
+                return DeviceIdentity.fromKeys(priv, pub)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("SillStore", "Keystore unavailable, using app storage: $e")
+        }
         val priv = prefs.getString("deviceKey", null)
         val pub = prefs.getString("devicePublicKey", null)
         if (priv != null && pub != null) {
@@ -67,6 +91,8 @@ class Store(context: Context) {
 
     @Synchronized
     fun forgetAll() = write(emptyList())
+
+    companion object { private const val KEY_ALIAS = "sill-device" }
 
     private fun write(list: List<PairedMac>) {
         prefs.edit().putString("pairedMacs", Json.write(list.map { it.toJson() })).apply()

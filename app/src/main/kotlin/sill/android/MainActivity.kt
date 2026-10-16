@@ -85,11 +85,19 @@ class MainActivity : Activity() {
     private var reconnectRunnable: Runnable? = null
     private var userEnded = false
     private var resumeOnStart = false
+    private var stopped = false
+    /** A Mac that refused this phone's key once: one more dial decides (it may have been a blip). */
+    private var refusedOnce: String? = null
+    /** A session to make again once its Mac registers anew (Sill relaunched: a fresh tag). */
+    private var waitingFor: Connection? = null
+    private var waitingTag: String? = null
+    private var lookingSince = 0L
+    private val debuggable get() = (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = Store(this)
-        discovery = Discovery(this) { macs -> found = macs; renderList() }
+        discovery = Discovery(this) { macs -> found = macs; renderList(); reconnectIfRegistered() }
         buildConnectScreen()
         setContentView(connectRoot)
         work.execute { store.identity } // make the key off the main thread
@@ -106,6 +114,9 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
+        stopped = false
+        lookingSince = System.currentTimeMillis()
+        main.postDelayed({ renderList() }, 3500)
         discovery.start()
         if (resumeOnStart) {
             resumeOnStart = false
@@ -115,9 +126,10 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
+        stopped = true
         discovery.stop()
         // Android stops a backgrounded app's network soon after; end cleanly and come back on return.
-        if (session != null) {
+        if (session != null || (busy && current != null)) {
             resumeOnStart = true
             endSession(byUser = false, quiet = true)
         }
@@ -204,14 +216,19 @@ class MainActivity : Activity() {
         list.removeAllViews()
         val paired = store.pairedMacs()
         val shownPaired = HashSet<String>()
-        if (found.isEmpty()) {
+        val listed = found.filter { it.door != Door.PLAIN || debuggable }
+        if (listed.isEmpty()) {
             val t = TextView(this)
-            t.text = discovery.failed ?: "Looking for Macs running Sill…"
+            val waited = System.currentTimeMillis() - lookingSince > 3000
+            t.text = discovery.failed ?: if (!waited) "Looking for Macs running Sill…" else
+                "Looking for Macs running Sill…\n\nNot listed? Check that Sill is open on the Mac (its icon in the menu bar), " +
+                "that the phone is on the same Wi-Fi (not a guest network, which keeps devices apart), and that the Mac is awake. " +
+                "Or use Connect by address."
             t.setTextColor(0xFFAAAAAA.toInt())
             t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             list.addView(t, lp(bottom = 8))
         }
-        for (m in found) {
+        for (m in listed) {
             val mac = matchPaired(m, paired)
             mac?.let { shownPaired.add(it.macID) }
             val word = when {
@@ -288,6 +305,7 @@ class MainActivity : Activity() {
 
     private fun tapFound(m: FoundMac) {
         cancelReconnect()
+        waitingFor = null
         val mac = matchPaired(m, store.pairedMacs())
         when {
             m.door == Door.PLAIN -> startSession(Connection(Target(m.host, m.port, null, plain = true), m.serviceName, null))
@@ -317,6 +335,15 @@ class MainActivity : Activity() {
                         else -> setStatus(Pairing.describe(asked.result, name))
                     }
                 }
+            } catch (e: javax.net.ssl.SSLException) {
+                // The remote door takes pairing connections only while the Mac shows its window.
+                Log.w(TAG, "ask: $e")
+                main.post {
+                    busy = false
+                    setStatus(null)
+                    askCode(host, port, name, null,
+                        "On the Mac, choose Pair iPhone or iPad… in Sill's menu, then type the code it shows.")
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "ask: $e")
                 main.post { busy = false; setStatus(networkWords(e, name)) }
@@ -327,6 +354,7 @@ class MainActivity : Activity() {
     private fun askCode(host: String, port: Int, name: String, macFp: ByteArray?, note: String?) {
         val field = EditText(this)
         field.inputType = InputType.TYPE_CLASS_NUMBER
+        field.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or android.view.inputmethod.EditorInfo.IME_ACTION_DONE
         field.filters = arrayOf(InputFilter.LengthFilter(14))
         field.hint = "12 digits"
         field.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
@@ -340,13 +368,14 @@ class MainActivity : Activity() {
             .setTitle("Enter the code from $name")
             .setView(box)
             .setPositiveButton("Pair", null)
-            .setNegativeButton("Cancel") { _, _ ->
-                work.execute { Pairing.cancel(host, port, store.identity, store.deviceName, store.model, macFp) }
-            }
+            .setNegativeButton("Cancel") { _, _ -> cancelAsk(host, port, macFp) }
             .create()
+        // Back or a tap outside withdraws the ask too, so the Mac's window closes.
+        dialog.setOnCancelListener { cancelAsk(host, port, macFp) }
         dialog.setOnShowListener {
             field.requestFocus()
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+            field.setOnEditorActionListener { _, _, _ -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick(); true }
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val (code, problem) = PairingCode.check(field.text.toString())
                 if (code == null) {
@@ -358,6 +387,11 @@ class MainActivity : Activity() {
             }
         }
         dialog.show()
+    }
+
+    private fun cancelAsk(host: String, port: Int, macFp: ByteArray?) {
+        if (macFp == null) return     // no ask was made (the Mac's own window)
+        work.execute { Pairing.cancel(host, port, store.identity, store.deviceName, store.model, macFp) }
     }
 
     private fun pairWithCode(host: String, port: Int, name: String, macFp: ByteArray?, code: String) {
@@ -373,7 +407,7 @@ class MainActivity : Activity() {
                         store.save(mac)
                         setStatus(null)
                         startSession(Connection(Target(host, port, mac.fingerprint), mac.name, mac))
-                    } else if (result.reason == PairResult.CODE && (result.triesLeft ?: 0) > 0) {
+                    } else if ((result.reason == PairResult.CODE && (result.triesLeft ?: 0) > 0) || result.reason == PairResult.BUSY) {
                         askCode(host, port, name, macFp, Pairing.describe(result, name))
                     } else {
                         setStatus(Pairing.describe(result, name))
@@ -405,7 +439,7 @@ class MainActivity : Activity() {
         work.execute {
             // The link's own addresses at its port, then any Mac listed here (its home door): the
             // pin makes a wrong one fail at once.
-            val tries = link.addresses.map { it to link.port } + found.map { it.host to it.port }
+            val tries = link.addresses + found.filter { it.door != Door.PLAIN }.map { it.host to it.port }
             var last: Exception? = null
             for ((host, port) in tries) {
                 try {
@@ -429,40 +463,35 @@ class MainActivity : Activity() {
     private fun askAddress() {
         val field = EditText(this)
         field.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        field.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or android.view.inputmethod.EditorInfo.IME_ACTION_GO
+        field.isSingleLine = true
         field.hint = "my-mac.tailnet.ts.net or 100.x.y.z:7455"
         store.recentAddresses().firstOrNull()?.let { field.setText(it) }
+        field.setSelectAllOnFocus(true)
         val box = LinearLayout(this)
         box.setPadding(dp(24), dp(8), dp(24), 0)
         box.addView(field, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle("Connect by address")
             .setMessage("The Mac's address, and its port if not 7455 (Remote Access's).")
             .setView(box)
-            .setPositiveButton("Connect") { _, _ ->
-                val text = field.text.toString().trim()
-                val (host, port) = parseAddress(text) ?: run { setStatus("That isn't an address."); return@setPositiveButton }
-                store.rememberAddress(text)
-                connectAddress(host, port)
-            }
+            .setPositiveButton("Connect", null)
             .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun parseAddress(text: String): Pair<String, Int>? {
-        if (text.isEmpty()) return null
-        if (text.startsWith("[")) {
-            val end = text.indexOf(']')
-            if (end < 0) return null
-            val host = text.substring(1, end)
-            val port = text.substring(end + 1).removePrefix(":").toIntOrNull() ?: 7455
-            return host to port
+            .create()
+        val submit = {
+            val text = field.text.toString().trim()
+            val parsed = sill.protocol.Address.parse(text, 7455)
+            if (parsed == null) field.error = "That isn't an address."
+            else {
+                dialog.dismiss()
+                store.rememberAddress(text)
+                connectAddress(parsed.first, parsed.second)
+            }
         }
-        val colons = text.count { it == ':' }
-        if (colons == 1) {
-            val port = text.substringAfter(':').toIntOrNull() ?: return null
-            return text.substringBefore(':') to port
-        }
-        return text to 7455
+        // The keyboard's own key submits too: sideways, the keyboard covers the dialog's buttons.
+        field.setOnEditorActionListener { _, _, _ -> submit(); true }
+        dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { submit() } }
+        dialog.show()
     }
 
     /** A typed address: a paired Mac there is dialed pinned; else pair first. */
@@ -474,8 +503,19 @@ class MainActivity : Activity() {
             busy = true
             setStatus("Connecting to $host…")
             work.execute {
-                val fp = Tls.fingerprintOf(host, port, store.identity)
-                val known = store.pairedMacs().firstOrNull { fp != null && it.fingerprint.contentEquals(fp) }
+                // Each paired Mac's pin in turn: a wrong one is refused here before this phone
+                // shows its key, so the Mac counts nothing against it.
+                var known: PairedMac? = null
+                var failure: Exception? = null
+                for (m in store.pairedMacs()) {
+                    try {
+                        val c = Tls.connect(host, port, store.identity, Tls.SESSION_ALPN, m.fingerprint)
+                        try { c.socket.close() } catch (_: Exception) {}
+                        known = m
+                        break
+                    } catch (_: Tls.PinRefused) {
+                    } catch (e: Exception) { failure = e; break }
+                }
                 main.post {
                     busy = false
                     when {
@@ -483,8 +523,9 @@ class MainActivity : Activity() {
                             known.lastHost = host; known.lastPort = port; store.save(known)
                             startSession(Connection(Target(host, port, known.fingerprint), known.name, known))
                         }
-                        fp != null -> pair(host, port, host)
-                        else -> setStatus("Couldn't reach $host:$port. Is Sill open on the Mac, with Remote Access on for port 7455?")
+                        failure != null -> setStatus(networkWords(failure, host) +
+                            if (port == 7455) " Away from home, the Mac needs Remote Access on." else "")
+                        else -> pair(host, port, host)
                     }
                 }
             }
@@ -523,6 +564,7 @@ class MainActivity : Activity() {
 
     private fun startSession(c: Connection) {
         cancelReconnect()
+        if (waitingFor?.mac?.macID != c.mac?.macID || c.mac == null) waitingFor = null
         busy = true
         userEnded = false
         current = c
@@ -535,12 +577,13 @@ class MainActivity : Activity() {
                 main.post {
                     busy = false
                     if (current != c) { s.close(); return@post }
+                    if (stopped) { s.close(); resumeOnStart = true; return@post }
                     session = s
                     reconnectAttempt = 0
                     c.mac?.let { m -> if (m.lastHost != c.target.host || m.lastPort != c.target.port) { m.lastHost = c.target.host; m.lastPort = c.target.port; store.save(m) } }
                     showStream()
-                    val sv = streamView!!
-                    sv.post { s.start(viewport()) }
+                    // The first viewport once the stream screen has its size.
+                    whenLaidOut(streamView!!) { if (session === s) s.start(viewport()) }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "connect: $e")
@@ -556,6 +599,17 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun whenLaidOut(v: View, body: () -> Unit) {
+        if (v.width > 0 && v.height > 0 && !v.isLayoutRequested) { body(); return }
+        v.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
+            override fun onLayoutChange(view: View, l: Int, t: Int, r: Int, b: Int, ol: Int, ot: Int, or: Int, ob: Int) {
+                if (view.width == 0 || view.height == 0) return
+                view.removeOnLayoutChangeListener(this)
+                body()
+            }
+        })
+    }
+
     private fun viewport(): Map<String, Any?> {
         val (w, h) = streamView?.panelSizeDp() ?: (800.0 to 450.0)
         @Suppress("DEPRECATION")
@@ -566,7 +620,7 @@ class MainActivity : Activity() {
 
     /** A session's events; its end counts only while it is still the current session. */
     private fun listenerFor(self: () -> Session) = object : SessionListener {
-        override fun onWindowList(list: WindowList) { main.post { windowList = list } }
+        override fun onWindowList(list: WindowList) { main.post { windowList = list; refusedOnce = null } }
         override fun onParameterSets(sets: ParameterSets) = decoder.onParameterSets(sets)
         override fun onFrame(payload: ByteArray, keyframe: Boolean, hostTimestamp: Double) = decoder.onFrame(payload, keyframe)
         override fun onThumbnail(windowID: Long, jpeg: ByteArray) { thumbnails[windowID] = jpeg }
@@ -583,11 +637,28 @@ class MainActivity : Activity() {
         if (userEnded) return
         showConnect()
         val name = c?.name ?: "The Mac"
+        if (error is Session.Refused && c?.mac != null) {
+            // The Mac no longer takes this phone's key. Dial once more (never a storm: the Mac
+            // shuts out an address after five refusals in a minute), then pair afresh.
+            if (refusedOnce != c.mac.macID) {
+                refusedOnce = c.mac.macID
+                setStatus("Checking with $name…")
+                reconnectAttempt = 2
+                scheduleReconnect()
+            } else {
+                refusedOnce = null
+                store.forget(c.mac.macID)
+                renderList()
+                setStatus("$name no longer knows this phone (it was removed, or Sill was set up again). Tap it to pair again.")
+            }
+            return
+        }
         if (goodbye != null) {
             val (words, again) = goodbye.describe(name, "phone")
             if (goodbye.reason == Goodbye.REMOVED || goodbye.reason == Goodbye.PAIRING_REQUIRED) c?.mac?.let { store.forget(it.macID); renderList() }
             setStatus(words)
             if (again && c != null) { reconnectAttempt = 1; scheduleReconnect() }
+            else if (goodbye.reason == Goodbye.QUIT && c != null) waitForRegistration(c)
             return
         }
         Log.w(TAG, "session ended: $error")
@@ -598,10 +669,31 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Connects again when [c]'s Mac registers anew (Sill opened again: a new recognition tag). */
+    private fun waitForRegistration(c: Connection) {
+        if (c.mac == null) return
+        waitingFor = c
+        waitingTag = found.firstOrNull { matchPaired(it, listOf(c.mac)) != null }?.tag
+    }
+
+    private fun reconnectIfRegistered() {
+        val c = waitingFor ?: return
+        if (session != null || busy || stopped) return
+        val row = found.firstOrNull { matchPaired(it, listOf(c.mac!!)) != null } ?: return
+        if (row.tag == waitingTag) return
+        waitingFor = null
+        startSession(c.copy(target = Target(row.host, row.port, c.mac!!.fingerprint)))
+    }
+
     /** Dial again after 1, 2, 4, 8, then every 15 s, ten times at most. */
     private fun scheduleReconnect() {
         val c = current ?: return
-        if (reconnectAttempt > 10) { setStatus("Couldn't reach ${c.name}. Tap it to try again."); reconnectAttempt = 0; return }
+        if (reconnectAttempt > 10) {
+            setStatus("Couldn't reach ${c.name}. Tap it to try again.")
+            reconnectAttempt = 0
+            waitForRegistration(c)
+            return
+        }
         val delay = if (reconnectAttempt <= 4) 1000L shl (reconnectAttempt - 1) else 15_000L
         setStatus("Reconnecting to ${c.name}…")
         val r = Runnable {

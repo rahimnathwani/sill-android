@@ -96,7 +96,19 @@ class ProtocolTest {
         val s = ByteArray(16) { 7 }
         val url = "sill://pair?v=1&m=" + MacId.make(k) + "&k=" + B64u.encode(k) + "&s=" + B64u.encode(s) + "&n=My%20Mac&p=7455&a=100.1.2.3"
         val l = PairLink.parse(url)!!
-        assertEquals("My Mac", l.name); assertEquals(7455, l.port); assertEquals(listOf("100.1.2.3"), l.addresses)
+        assertEquals("My Mac", l.name); assertEquals(7455, l.port); assertEquals(listOf("100.1.2.3" to 7455), l.addresses)
         assertNull(PairLink.parse(url.replace("v=1", "v=2")))
+        val l2 = PairLink.parse(url + "&a=%5Bfd7a%3A%3A1%5D&a=mac.ts.net%3A9000")!!
+        assertEquals(listOf("100.1.2.3" to 7455, "fd7a::1" to 7455, "mac.ts.net" to 9000), l2.addresses)
+    }
+
+    @Test fun addresses() {
+        assertEquals("h" to 7455, Address.parse("h", 7455))
+        assertEquals("h" to 80, Address.parse("h:80", 7455))
+        assertEquals("fe80::1" to 7455, Address.parse("fe80::1", 7455))
+        assertEquals("::1" to 9, Address.parse("[::1]:9", 7455))
+        assertNull(Address.parse("h:x", 7455))
+        assertNull(Address.parse("", 7455))
+        assertEquals("ab", SafeText.label("a\u0000b\n"))
     }
 }

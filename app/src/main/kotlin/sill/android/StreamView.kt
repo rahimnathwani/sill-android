@@ -228,13 +228,27 @@ class StreamView(
 
     private fun pointer(action: PointerAction, p: Pair<Double, Double>) = send(Input.pointer(action, p.first, p.second))
 
-    /** The latched modifiers' own keys down, around [body], then up: how a keyboard sends a chord. */
+    /**
+     * The latched modifiers' own keys down around [body], then up: how a keyboard sends a chord
+     * (KeyChords.swift). Each down carries the flags held so far and each up those still held, as
+     * the Mac's KeyStrokes lets go of a modifier a later event no longer says.
+     */
     private fun withLatched(body: () -> Unit) {
         val mods = latched.toList()
-        for (m in mods) send(Input.key(modifierUsage(m), true, 0))
+        modifiersDown(mods)
         body()
-        for (m in mods.reversed()) send(Input.key(modifierUsage(m), false, 0))
+        modifiersUp(mods)
         clearLatches()
+    }
+
+    private fun modifiersDown(mods: List<Long>) {
+        var held = 0L
+        for (m in mods) { held = held or m; send(Input.key(modifierUsage(m), true, held)) }
+    }
+
+    private fun modifiersUp(mods: List<Long>) {
+        var held = mods.fold(0L) { a, m -> a or m }
+        for (m in mods.reversed()) { held = held and m.inv(); send(Input.key(modifierUsage(m), false, held)) }
     }
 
     private fun modifierUsage(m: Long) = when (m) {
@@ -247,11 +261,11 @@ class StreamView(
 
     private fun chord(usage: Int, extra: Long) {
         val mods = latchedFlags() or extra
-        val held = listOf(Modifiers.COMMAND, Modifiers.CONTROL, Modifiers.OPTION, Modifiers.SHIFT).filter { mods and it != 0L }
-        for (m in held) send(Input.key(modifierUsage(m), true, 0))
+        val held = listOf(Modifiers.CONTROL, Modifiers.OPTION, Modifiers.SHIFT, Modifiers.COMMAND).filter { mods and it != 0L }
+        modifiersDown(held)
         send(Input.key(usage, true, mods))
         send(Input.key(usage, false, mods))
-        for (m in held.reversed()) send(Input.key(modifierUsage(m), false, 0))
+        modifiersUp(held)
         clearLatches()
     }
 
@@ -413,7 +427,7 @@ class StreamView(
                     main.removeCallbacks(holdRunnable)
                     when (mode) {
                         Mode.SCROLL -> endScroll(coast = false)
-                        Mode.DRAG -> normalized(lastX, lastY, true)?.let { p -> withLatched { pointer(PointerAction.LEFT_UP, p) } }
+                        Mode.DRAG -> normalized(lastX, lastY, true)?.let { p -> pointer(PointerAction.LEFT_UP, p); upLatched() }
                         else -> {}
                     }
                     if (e.pointerCount == 2) {
@@ -520,10 +534,10 @@ class StreamView(
         private var dragMods: List<Long> = emptyList()
         private fun downLatched() {
             dragMods = latched.toList()
-            for (m in dragMods) send(Input.key(modifierUsage(m), true, 0))
+            modifiersDown(dragMods)
         }
         private fun upLatched() {
-            for (m in dragMods.reversed()) send(Input.key(modifierUsage(m), false, 0))
+            modifiersUp(dragMods)
             dragMods = emptyList()
             clearLatches()
         }

@@ -73,7 +73,7 @@ class DeviceIdentity private constructor(
     val point: ByteArray = uncompressed(publicKey as ECPublicKey)
     val fingerprint: ByteArray = Spki.fingerprint(Spki.der(point))
 
-    /** PKCS#8 bytes of the private key and X.509 SPKI bytes of the public, for storage. */
+    /** PKCS#8 bytes of the private key (null for a hardware key) and X.509 SPKI bytes of the public. */
     fun privateKeyBytes(): ByteArray = privateKey.encoded
     fun publicKeyBytes(): ByteArray = publicKey.encoded
 
@@ -90,6 +90,9 @@ class DeviceIdentity private constructor(
             return from(kf.generatePrivate(PKCS8EncodedKeySpec(privateBytes)),
                         kf.generatePublic(X509EncodedKeySpec(publicBytes)))
         }
+
+        /** From keys held elsewhere (Android Keystore: the private key never leaves the hardware). */
+        fun fromKeys(priv: PrivateKey, pub: PublicKey): DeviceIdentity = from(priv, pub)
 
         private fun from(priv: PrivateKey, pub: PublicKey): DeviceIdentity {
             val point = uncompressed(pub as ECPublicKey)
