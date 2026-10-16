@@ -15,8 +15,8 @@ Mac needs no changes. Problems with this app go to
    (allow Screen Recording and Accessibility when it asks).
 2. **On the phone:** download `sill-android-<version>.apk` from
    [Releases](https://github.com/rahimnathwani/sill-android/releases/latest) and open it (allow
-   installs from your browser when Android asks). Android 11 or later. A Google Play listing is on
-   its way. To be told of updates, add this repo to [Obtainium](https://obtainium.imranr.dev).
+   installs from your browser when Android asks). Android 11 or later.
+   To be told of updates, add this repo to [Obtainium](https://obtainium.imranr.dev).
 3. **Connect:** with both on the same Wi-Fi, open Sill on the phone and tap your Mac. The Mac shows
    a pairing window with a 12-digit code; type it on the phone. Next time it connects at once.
 
